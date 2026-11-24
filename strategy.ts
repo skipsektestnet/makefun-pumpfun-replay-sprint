@@ -21,11 +21,25 @@
 //   riding: every one of those tested worse.
 // - Order splitting only exists to keep the fill count on pace (target 200 fills over
 //   the window); splitting past 2 pieces costs more in tx fees than it buys.
+// - FIX PASS, tested and REVERTED: a stale-tape exit (staleSlots 4 — exit a held coin
+//   silent for 4 slots) sounded right — the spike comes while the tape is live — but
+//   grade-local says it hurts: +0.3228 -> +0.2425 SOL, win rate 32.4% -> 28.6%,
+//   and net without the top 3 coins falls to -0.05 SOL. Winners evidently pause and
+//   then spike; cutting them early costs more than the freed position slots buy.
+//   staleSlots stays disabled (1,000,000) and the full 10-slot hold stands.
+// - FIX PASS, tested and REVERTED: partial take-profit (tp1Bps 1500 — sell half at
+//   +15%, rest protected at breakeven). Also hurts: +0.3228 -> +0.2877 SOL, fills
+//   311 -> 324 (extra tx fees), net without the top 3 coins +0.01 -> -0.01 SOL.
+//   Selling half early gives up the run from +15% to +25% on the coins that get
+//   there, and the breakeven stop cuts remainders that dip and then recover. The
+//   full +25% / -12% / 10-slot exit stands; tp1 stays disabled.
 //
-// Result on the dev window: +0.383 SOL net (+0.071 / +0.312 per half), 107 coins,
-// 313 fills, max drawdown 0.7%. The final window is fresh coins, so this is a
-// tendency, not a promise — but every neighbouring setting in the sweep lands within
-// a few hundredths of it, which is what a flat, non-overfit region looks like.
+// Result on the dev window (baseline, before the stale exit): +0.383 SOL net in the
+// split-half simulator (+0.071 / +0.312 per half), 107 coins, 313 fills, max drawdown
+// 0.7%; grade-local +0.3228 SOL, 311 fills, 105 coins, 105 round trips, drawdown
+// 0.68%, guardrails met. The final window is fresh coins, so this is a tendency, not
+// a promise — but every neighbouring setting in the sweep lands within a few hundredths
+// of it, which is what a flat, non-overfit region looks like.
 //
 // Deterministic by construction: no clock, no randomness, no I/O. Iteration only over
 // insertion-ordered maps fed by the batch stream; block time is used only for the
@@ -138,6 +152,8 @@ export const DEFAULT_PARAMS: Params = {
   minRecentBuyers: 0,
   skipDevSold: true,
   buySlippageBps: 10_000,
+  // Partial take-profit stays DISABLED (tp1Bps 1,000,000): enabling it at +15% was
+  // tested in the fix pass and lowered grade-local to +0.2877 SOL (see header).
   tp1Bps: 1_000_000,
   tp1PartBps: 5_000,
   slAfterTp1Bps: 0,
@@ -415,6 +431,9 @@ export function createStrategy(params: Params = DEFAULT_PARAMS) {
         if (state.slot - h.openedSlot >= P.maxHold) exit = true;
         if (c !== undefined) {
           if (P.exitOnDevSell && c.devSold && !h.devSoldAtOpen) exit = true;
+          // Stale tape: the spike comes while the tape is live. A coin silent for
+          // staleSlots has missed it — free the position slot for the next launch
+          // instead of sitting out the rest of the 10-slot hold on dead money.
           if (state.slot - c.lastTradeSlot >= P.staleSlots) exit = true;
           if (flow(c, state.slot).net < -BigInt(P.exitFlowLamports)) exit = true;
         }
